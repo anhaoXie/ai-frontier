@@ -1,0 +1,34 @@
+# ---------------------------------------------------------------
+# 行尾必须锁死，否则这个项目在别人机器上会坏。
+#
+# 背景：Windows 的 cmd.exe 无法正确解析 LF-only 的 .cmd 文件，
+# 报错还非常误导（实测会报 "'ai-frontier' is not recognized"，
+# 看起来像命令拼错了，实际是行尾问题）。
+#
+# 本机 core.autocrlf=true，所以 clone 时 git 会做转换。
+# 显式写死比依赖每个人的本地 git 配置可靠 —— 尤其是
+# .cmd 文件，一旦被转成 LF 就整个跑不起来。
+# ---------------------------------------------------------------
+
+# 批处理脚本：一律 CRLF，不参与任何转换
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
+# PowerShell 脚本：CRLF（Windows 习惯，且中文需要 UTF-8 BOM 才不会乱码，
+# 这一点在 install_task.ps1 里踩过 —— BOM 由文件本身携带，git 不管）
+*.ps1   text eol=crlf
+
+# 源码和文档：统一 LF，由 git 在 checkout 时按需转换
+*.py    text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# 二进制，别碰
+*.xlsx  binary
+*.docx  binary
+*.pdf   binary
+*.png   binary

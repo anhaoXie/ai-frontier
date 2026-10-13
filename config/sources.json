@@ -1,0 +1,318 @@
+{
+  "_layer": "① 数据层 —— 从哪来。",
+  "_readme": "所有源都是【实测过】的。判据不是『能不能返回 200』，而是『返回的内容里有没有真东西』。",
+  "_probe_findings": [
+    "arXiv 官方 API (export.arxiv.org) 实测返回 HTTP 429 —— 被限速，不能作为主路。改用 rss.arxiv.org（实测 cs.LG 413 条 / cs.AI 313 条，摘要中位 1451 字）。",
+    "rss.arxiv.org 的 pubDate 字段是空的，日期在 pubdate 小写字段里；且 announce_type 区分 new/cross/replace —— 这是过滤『真新论文』和『v2 修订/交叉列表』的唯一可靠依据。",
+    "HuggingFace Blog 返回 876 条但 0 条含正文 —— 纯摘要源，摘要就是抄标题，已剔除。",
+    "量子位 10 条 0 条可用；机器之心返回 HTML 首页；新智元 404；Anthropic RSS 404 —— 均已剔除。",
+    "Reddit / Import AI / DeepMind Blog / Simon Willison 在本机间歇性超时（VPN 路径抖动），已标注 flaky，失败不影响整体。",
+    "本机存在 TLS 拦截：rss.arxiv.org 等站点证书校验失败，必须用不校验的 SSL 上下文。"
+  ],
+  "fetch": {
+    "timeout_seconds": 20,
+    "retries": 1,
+    "retry_backoff_seconds": 1.2,
+    "max_workers": 16,
+    "deadline_seconds": 75,
+    "delay_between_requests": 0.0,
+    "insecure_tls": true,
+    "max_body_chars": 4000,
+    "min_body_chars": 120,
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "_tls_note": "insecure_tls=true 是因为这台机器装了会做 TLS 中间人的 VPN。如果你换到干净网络，把它改成 false 更安全。",
+    "_deadline_note": "deadline_seconds 是整轮抓取的硬闸门。VPN 抖动时个别站点会一路卡到超时，没有闸门会把一轮采集拖成好几分钟（实测 150 秒）。宁可丢一两个慢源，也不能让当天日报跑不出来。",
+    "_timeout_note": "timeout 从 30 降到 20、retries 从 2 降到 1：20 秒对 RSS/JSON 接口足够，重试次数减少能显著缩短最坏情况。"
+  },
+  "sources": [
+    {
+      "id": "arxiv_api",
+      "kind": "arxiv_api",
+      "name": "arXiv 官方 API（兜底）",
+      "url": "http://export.arxiv.org/api/query?search_query=cat:cs.CL+OR+cat:cs.LG+OR+cat:cs.AI&sortBy=submittedDate&sortOrder=descending&max_results=120",
+      "category_hint": "论文",
+      "weight": 1.0,
+      "enabled": true,
+      "note": "rss.arxiv.org 会返回 HTTP 200 + 合法 XML + 【0 条 item】—— 每天 04:00 UTC 之前它就是这样（实测 2026-10-13 08:26 UTC 仍为 0 条）。这是最危险的一类失败：HTTP 层完全成功、不报错，只是安静地什么也不给，而 arXiv 是本项目最大的信息源。所以 RSS 之外再挂一条官方 API 路线，两者按 arXiv 编号自动去重合并。API 早先实测 429 限速、现已恢复 —— 说明限速是临时的，两条路线都留着才稳。",
+      "cadence": "daily"
+    },
+    {
+      "id": "arxiv_cl",
+      "kind": "arxiv_rss",
+      "name": "arXiv cs.CL（计算语言学）",
+      "url": "https://rss.arxiv.org/rss/cs.CL",
+      "category_hint": "论文",
+      "weight": 1.0,
+      "enabled": true,
+      "note": "大模型主战场。实测 300+ 条/天，摘要完整。",
+      "cadence": "daily"
+    },
+    {
+      "id": "arxiv_lg",
+      "kind": "arxiv_rss",
+      "name": "arXiv cs.LG（机器学习）",
+      "url": "https://rss.arxiv.org/rss/cs.LG",
+      "category_hint": "论文",
+      "weight": 1.0,
+      "enabled": true,
+      "note": "实测 413 条/天。",
+      "cadence": "daily"
+    },
+    {
+      "id": "arxiv_ai",
+      "kind": "arxiv_rss",
+      "name": "arXiv cs.AI（人工智能）",
+      "url": "https://rss.arxiv.org/rss/cs.AI",
+      "category_hint": "论文",
+      "weight": 0.95,
+      "enabled": true,
+      "note": "实测 313 条/天。含 stat.ML 交叉。",
+      "cadence": "daily"
+    },
+    {
+      "id": "hf_daily",
+      "kind": "hf_daily",
+      "name": "HuggingFace Daily Papers",
+      "url": "https://huggingface.co/api/daily_papers?limit=40",
+      "category_hint": "论文",
+      "weight": 1.0,
+      "enabled": true,
+      "note": "人工挑选的当日论文，自带 upvote 数。质量高、覆盖面窄 —— 用来给 arXiv 做交叉验证。",
+      "cadence": "daily"
+    },
+    {
+      "id": "hf_models",
+      "kind": "hf_models",
+      "name": "HuggingFace 模型趋势榜",
+      "url": "https://huggingface.co/api/models?sort=trendingScore&direction=-1&limit=40",
+      "category_hint": "开源",
+      "weight": 0.7,
+      "enabled": true,
+      "note": "开源模型动向。会过滤掉 gguf/awq/gptq 等量化再打包版本，否则榜上全是同一模型的搬运。",
+      "cadence": "news"
+    },
+    {
+      "id": "github_new",
+      "kind": "github_search",
+      "name": "GitHub 高星 AI 新仓库（标题/描述）",
+      "url": "https://api.github.com/search/repositories?q=created:>{since}+stars:>20+llm+in:name,description,readme&sort=stars&order=desc&per_page=30",
+      "category_hint": "开源",
+      "weight": 0.7,
+      "enabled": true,
+      "note": "用关键词 in:name,description,readme 命中，覆盖面广。实测 total=67。",
+      "cadence": "news"
+    },
+    {
+      "id": "github_new_topic",
+      "kind": "github_search",
+      "name": "GitHub 高星 AI 新仓库（topic 标签）",
+      "url": "https://api.github.com/search/repositories?q=created:>{since}+stars:>20+topic:llm,machine-learning,agents,deep-learning,transformers,diffusion-models&sort=stars&order=desc&per_page=30",
+      "category_hint": "开源",
+      "weight": 0.7,
+      "enabled": true,
+      "note": "坑：GitHub 不接受 topic:a OR topic:b（返回 422），也不接受 (topic:a OR topic:b)（静默返回 0 条 —— 最危险的一种失败）。只有逗号写法有效，实测 total=31。",
+      "cadence": "news"
+    },
+    {
+      "id": "hn_ai",
+      "kind": "hn_search",
+      "name": "Hacker News（AI/LLM 讨论）",
+      "url": "https://hn.algolia.com/api/v1/search?query={q}&tags=story&numericFilters=points%3E40&hitsPerPage=25",
+      "queries": [
+        "LLM",
+        "AI model",
+        "agent",
+        "inference"
+      ],
+      "category_hint": "社区",
+      "weight": 0.6,
+      "enabled": true,
+      "note": "社区热度信号，带真实 points 和评论数。一线从业者的一手反馈常早于媒体。",
+      "cadence": "news"
+    },
+    {
+      "id": "openai_news",
+      "kind": "rss",
+      "name": "OpenAI 官方动态",
+      "url": "https://openai.com/news/rss.xml",
+      "category_hint": "官方",
+      "weight": 1.0,
+      "enabled": true,
+      "note": "正文短（中位 149 字），但作者是官方本身，故保留。会在正文里显示为摘要级。",
+      "cadence": "news"
+    },
+    {
+      "id": "anthropic_news",
+      "kind": "html_links",
+      "name": "Anthropic 官方动态",
+      "url": "https://www.anthropic.com/news",
+      "link_pattern": "href=\"(/news/[a-z0-9\\-]+)\"",
+      "base": "https://www.anthropic.com",
+      "category_hint": "官方",
+      "weight": 1.0,
+      "enabled": true,
+      "note": "官方 RSS 已 404，改抓新闻页链接（实测 10 条）。只有标题没有正文。",
+      "cadence": "daily"
+    },
+    {
+      "id": "msr_blog",
+      "kind": "rss",
+      "name": "Microsoft Research Blog",
+      "url": "https://www.microsoft.com/en-us/research/feed/",
+      "category_hint": "实验室",
+      "weight": 0.9,
+      "enabled": true,
+      "note": "实测 10/10 可用，正文中位 9822 字。全文源。",
+      "cadence": "daily"
+    },
+    {
+      "id": "bair",
+      "kind": "rss",
+      "name": "BAIR（伯克利 AI 实验室）",
+      "url": "https://bair.berkeley.edu/blog/feed.xml",
+      "category_hint": "实验室",
+      "weight": 0.9,
+      "enabled": true,
+      "note": "实测 10/10 可用，正文中位 12385 字。学术深度高，更新慢。",
+      "cadence": "daily"
+    },
+    {
+      "id": "mit_csail",
+      "kind": "rss",
+      "name": "MIT CSAIL",
+      "url": "https://www.csail.mit.edu/rss.xml",
+      "category_hint": "实验室",
+      "weight": 0.9,
+      "enabled": true,
+      "note": "实测 9/9 可用，正文中位 5696 字。",
+      "cadence": "daily"
+    },
+    {
+      "id": "sebastian_raschka",
+      "kind": "rss",
+      "name": "Sebastian Raschka（技术深挖）",
+      "url": "https://magazine.sebastianraschka.com/feed",
+      "category_hint": "分析",
+      "weight": 0.85,
+      "enabled": true,
+      "note": "实测 20/20 可用，正文中位 34876 字。会被 max_body_chars 截断。",
+      "cadence": "daily"
+    },
+    {
+      "id": "interconnects",
+      "kind": "rss",
+      "name": "Interconnects（Nathan Lambert）",
+      "url": "https://www.interconnects.ai/feed",
+      "category_hint": "分析",
+      "weight": 0.85,
+      "enabled": true,
+      "note": "实测 20/20 可用，正文中位 10899 字。开源模型领域最有判断力的分析之一。",
+      "cadence": "daily"
+    },
+    {
+      "id": "the_decoder",
+      "kind": "rss",
+      "name": "The Decoder（AI 垂直媒体）",
+      "url": "https://the-decoder.com/feed/",
+      "category_hint": "媒体",
+      "weight": 0.7,
+      "enabled": true,
+      "note": "实测 10/10 可用，正文中位 431 字。篇幅短但当天事件覆盖快。",
+      "cadence": "news"
+    },
+    {
+      "id": "simon_willison",
+      "kind": "rss",
+      "name": "Simon Willison（实操派）",
+      "url": "https://simonwillison.net/atom/everything/",
+      "category_hint": "分析",
+      "weight": 0.8,
+      "enabled": true,
+      "flaky": true,
+      "note": "实测中位 827 字，更新极勤。间歇性超时。",
+      "cadence": "news"
+    },
+    {
+      "id": "lilian_weng",
+      "kind": "rss",
+      "name": "Lilian Weng",
+      "url": "https://lilianweng.github.io/index.xml",
+      "category_hint": "分析",
+      "weight": 0.9,
+      "enabled": true,
+      "note": "实测 48/53 可用，中位 501 字。低频但每篇都值得读。",
+      "cadence": "daily"
+    },
+    {
+      "id": "the_gradient",
+      "kind": "rss",
+      "name": "The Gradient（深度分析）",
+      "url": "https://thegradient.pub/rss/",
+      "category_hint": "分析",
+      "weight": 0.85,
+      "enabled": true,
+      "flaky": true,
+      "note": "实测 15 条。间歇性超时。",
+      "cadence": "daily"
+    },
+    {
+      "id": "import_ai",
+      "kind": "rss",
+      "name": "Import AI（Jack Clark）",
+      "url": "https://importai.substack.com/feed",
+      "category_hint": "分析",
+      "weight": 0.85,
+      "enabled": true,
+      "flaky": true,
+      "note": "政策与前沿综述。本机常超时，失败可接受。",
+      "cadence": "daily"
+    },
+    {
+      "id": "deepmind_blog",
+      "kind": "rss",
+      "name": "Google DeepMind Blog",
+      "url": "https://deepmind.google/blog/rss.xml",
+      "category_hint": "实验室",
+      "weight": 1.0,
+      "enabled": true,
+      "flaky": true,
+      "note": "一线实验室官方。本机 SSL 常中断，失败可接受 —— 重大发布通常也会出现在其他地方。",
+      "cadence": "daily"
+    }
+  ],
+  "rejected": [
+    {
+      "name": "HuggingFace Blog",
+      "reason": "876 条 0 条含正文，纯摘要源"
+    },
+    {
+      "name": "量子位",
+      "reason": "10 条 0 条可用"
+    },
+    {
+      "name": "机器之心",
+      "reason": "RSS 返回 HTML 首页"
+    },
+    {
+      "name": "新智元",
+      "reason": "HTTP 404"
+    },
+    {
+      "name": "Anthropic RSS",
+      "reason": "HTTP 404，改走 html_links"
+    },
+    {
+      "name": "arXiv 官方 API",
+      "reason": "HTTP 429 限速，改走 rss.arxiv.org"
+    },
+    {
+      "name": "arXiv RSS cs.CV",
+      "reason": "实测返回 0 条 item"
+    },
+    {
+      "name": "Reddit r/LocalLLaMA",
+      "reason": "本机 HTTP 403/URLError，无法稳定访问"
+    }
+  ],
+  "_cadence_note": "cadence 决定时间窗口：news=max(24h,72h)，daily=168h（一周）。为什么要分：arXiv 只在工作日公告，周末不更新。2026-10-13（周二）上午实测，arXiv 最新一篇论文是 10-09 17:59，已是 86.5 小时前 —— 用 72 小时窗口会把整个论文源砍成 0 条，导致周一、周二的报告里没有任何论文。放宽后旧内容不会霸榜，因为新鲜度分项照常扣分：『不进候选』和『排得靠后』是两件事。"
+}
