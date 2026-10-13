@@ -206,6 +206,32 @@ Wired 返回 50 条但 0 条可用 —— 它不报错，只是安静地给你�
 
 ---
 
+## 换一台机器 / 给别人用
+
+代码里为**本机**写死了几处默认路径（都有环境变量可以覆盖，不用改代码）：
+
+| 位置 | 写死了什么 | 怎么覆盖 |
+|---|---|---|
+| `src/make_docx.py` | DSH 自带 LibreOffice Kit 的 node 和 cli 路径 | `AF_LO_NODE` / `AF_LO_CLI` |
+| `run.cmd` `daily_collect.cmd` `启动AI前沿雷达.cmd` | Python 解释器候选路径（先找 DSH 运行时，再退回 PATH） | `AF_PYTHON` |
+| `install_task.ps1` | 同上 | `AF_PYTHON` |
+
+**为什么要优先 DSH 自带的 Python**：它才装了 `openpyxl` 和 `python-docx`。
+系统 PATH 里的 Python 通常没有这两个库，选了它 Excel 和 Word 会失败
+（或报 `ModuleNotFoundError`）。这个坑实测踩过，脚本里已经按"DSH 优先"排。
+
+**LibreOffice 不要用系统装的**：`make_docx.py` 只调 DSH 随应用分发的
+LibreOffice Kit。如果找不到会明确报错并让你只交 Markdown，
+而不是偷偷换一个渲染器 —— 换渲染器会让排版结果不可预期。
+
+### 换领域不用改代码
+
+`config/sources.json`（换信息源）+ `config/topic.py`（换主题标签和信号词典）。
+`src/` 下的网络层、解析框架、去重、打分、报告渲染都与领域无关。
+加源之前**一定先用 `run.cmd collect --only <源id>` 验证它给不给你正文**。
+
+---
+
 ## 常见问题
 
 **Q: 为什么有些源总是失败？**
