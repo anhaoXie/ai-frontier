@@ -35,6 +35,6 @@ REM   2) for /f 启动子命令时会在空格处切断解释器路径（"%PY%" 
 REM      所以"让 Python 算日期"这条路在 batch 里同样走不通。
 REM 保留一份滚动日志最省事：每次覆盖，内容自带完整输出。
 REM 需要按天归档的详细记录在 out\logs\collect-<日期>.json 里。
-"%PY%" src\collect.py >> "out\logs\task-last.log" 2>&1
+"%PY%" src\collect.py --if-fresh >> "out\logs\task-last.log" 2>&1
 set "RC=%ERRORLEVEL%"
 exit /b %RC%

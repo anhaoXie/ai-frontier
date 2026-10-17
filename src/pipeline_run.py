@@ -15,6 +15,7 @@ collect.py 和 app_server.py 都调这里，不重复实现。
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -82,11 +83,40 @@ def build_scoring_cfg(topic, window=None):
     return cfg
 
 
+_SKIP_DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+                   "Saturday", "Sunday"]
+
+
+def _skip_day_for(text, now):
+    """若该 RSS 的 <skipDays> 明确声明「今天不发布」，返回今天的星期名；否则 None。
+
+    arXiv 的 cs.CL / cs.LG 在周末返回 200 + 合法 XML + 0 条 item，channel 里
+    <skipDays> 写着 Saturday/Sunday。这不是故障，但如果不识别，它会被报成
+    「源静默变空」—— 一种会训练人忽略告警的误报。误报和静默失败一样伤。
+    """
+    if not text:
+        return None
+    # 必须是「真的空 channel」才行。cs.AI 的 channel 里同样写着 skipDays 周末，
+    # 但它明明带着 453 条 item —— 只看 skipDays 会把正常源误判成周末停更。
+    if re.search(r"<item[\s>]", text) or re.search(r"<entry[\s>]", text):
+        return None
+    m = re.search(r"<skipDays>(.*?)</skipDays>", text, re.S)
+    if not m:
+        return None
+    today = _SKIP_DAY_NAMES[now.weekday()]
+    days = set(re.findall(r"<day>\s*([A-Za-z]+)\s*</day>", m.group(1)))
+    return today if today in days else None
+
+
 def build_jobs(sources):
     """展开成具体抓取任务。flaky 源排最前，保证它们拿到完整重试窗口。"""
     jobs, meta = [], {}
     now = datetime.now(timezone.utc)
     since = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+    # Algolia 的 created_at_i 要的是 unix 时间戳，不是日期串，所以 {since} 用不上。
+    # 窗口取 72h：这是 news 类源的窗口上限。再放宽的话，hitsPerPage=25 会被窗口外的
+    # 旧帖占满，下游时间过滤又会把它们全部丢掉 —— 那就等于白抓。
+    since_ts = int((now - timedelta(hours=72)).timestamp())
     for s in sorted(sources, key=lambda x: (not x.get("flaky", False))):
         if not s.get("enabled", True):
             continue
@@ -95,11 +125,14 @@ def build_jobs(sources):
         if queries:
             for i, q in enumerate(queries):
                 key = f"{s['id']}#{i}"
-                jobs.append((key, tpl.replace("{q}", q.replace(" ", "+")), None))
+                url = (tpl.replace("{since_ts}", str(since_ts))
+                          .replace("{q}", q.replace(" ", "+")))
+                jobs.append((key, url, None))
                 meta[key] = s
         else:
             key = s["id"]
-            jobs.append((key, tpl.replace("{since}", since), None))
+            url = tpl.replace("{since_ts}", str(since_ts)).replace("{since}", since)
+            jobs.append((key, url, None))
             meta[key] = s
     return jobs, meta
 
@@ -159,6 +192,7 @@ def run_collection(window=None, only=None, no_state=False, log=None,
         sid = s["id"]
         got, warns, nreq = [], [], 0
         fetched_ok = 0
+        skip_day = None
         for key, res in results.items():
             if key == sid or key.startswith(sid + "#"):
                 nreq += 1
@@ -167,6 +201,8 @@ def run_collection(window=None, only=None, no_state=False, log=None,
                 its, w = srcmod.parse(res, s, now)
                 got.extend(its)
                 warns.extend(w)
+                if not its and res.ok and skip_day is None:
+                    skip_day = _skip_day_for(getattr(res, "text", None), now)
         # 关键：区分三种"没有内容"，它们的处置方式完全不同。
         #   1) 请求就失败了            -> 网络/站点问题，重试或忽略
         #   2) 请求成功但解析出 0 条    -> 最危险：源静默变空（arXiv RSS 每天
@@ -175,7 +211,10 @@ def run_collection(window=None, only=None, no_state=False, log=None,
         # 如果不区分，第 2 种会和第 3 种一起显示成"正常"，然后你会在
         # 毫不知情的情况下用一份缺了一大块素材的候选清单。
         if not got:
-            if fetched_ok and nreq:
+            if skip_day:
+                warns.append(f"该源声明今天（{skip_day}）不发布列表 —— "
+                             f"属于源自身的发布日历，不是故障")
+            elif fetched_ok and nreq:
                 warns.append("请求成功但解析出 0 条内容 —— 疑似源静默变空，"
                              "而不是网络失败")
             elif warns:
@@ -186,7 +225,7 @@ def run_collection(window=None, only=None, no_state=False, log=None,
             "name": s["name"], "kind": s.get("kind"), "requests": nreq,
             "items": len(got), "warnings": warns[:6],
             "weight": s.get("weight", 0.5), "ok": len(got) > 0,
-            "fetched_ok": fetched_ok,
+            "fetched_ok": fetched_ok, "skip_day": skip_day,
         }
         items.extend(got)
     raw_total = len(items)
@@ -251,9 +290,25 @@ def run_collection(window=None, only=None, no_state=False, log=None,
         json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     say("已写入候选数据")
 
-    mpath = write_markdown_digest(payload, OUT / "digests")
-    xpath = write_xlsx(payload, OUT / "candidates")
-    say("已生成候选清单（Markdown + Excel）")
+    # 渲染产物是锦上添花：候选 JSON 已经落盘，采集本身已经成功。
+    # 所以这两个渲染失败不能让整轮采集崩掉。2026-10-16 踩过一次：
+    # latest.xlsx 正开在 WPS 里，openpyxl 抛 PermissionError，异常一路
+    # 冒到 collect.py 的 traceback，于是 —— state 没保存（"首次出现"判定
+    # 从此失真）、collect 日志没写、定时任务只看到一个崩溃，而当天数据
+    # 其实已经抓到了。渲染失败只该是一条警告。
+    def _render(fn, out_dir, label):
+        try:
+            return fn(payload, out_dir)
+        except Exception as e:
+            say(f"警告：{label}生成失败（{type(e).__name__}: {e}）"
+                f"—— 若该文件正被 Excel/WPS 打开，关掉它重跑即可；"
+                f"候选 JSON 与 state 不受影响")
+            return None
+
+    mpath = _render(write_markdown_digest, OUT / "digests", "Markdown 清单")
+    xpath = _render(write_xlsx, OUT / "candidates", "Excel 候选清单")
+    say("已生成候选清单（Markdown + Excel）" if (mpath and xpath)
+        else "候选清单部分生成，见上方警告")
 
     if not no_state:
         sc.save_state(STATE_PATH, state, today, [it.uid for it in items])
@@ -267,16 +322,22 @@ def run_collection(window=None, only=None, no_state=False, log=None,
                                 for k, v in diag.items()}},
                    ensure_ascii=False, indent=1), encoding="utf-8")
 
-    bad = [v["name"] for v in diag.values() if not v["ok"]]
+    skipped = [f'{v["name"]}（{v.get("skip_day")}）'
+               for v in diag.values() if v.get("skip_day")]
+    bad = [v["name"] for v in diag.values()
+           if not v["ok"] and not v.get("skip_day")]
     filtered_out = [v["name"] for v in diag.values() if v.get("all_filtered")]
     say(f"用时 {elapsed:.1f} 秒")
+    if skipped:
+        say(f"按源自身日历今天不发布（非故障）：{', '.join(skipped)}")
     if bad:
         say(f"注意：{len(bad)} 个源今天没有产出 —— {', '.join(bad)}")
     if filtered_out:
         say(f"另有 {len(filtered_out)} 个源抓到了内容但全在窗口外："
             f"{', '.join(filtered_out)}")
 
-    payload["_paths"] = {"json": str(cpath), "digest": str(mpath),
-                         "xlsx": str(xpath)}
+    payload["_paths"] = {"json": str(cpath),
+                         "digest": str(mpath) if mpath else None,
+                         "xlsx": str(xpath) if xpath else None}
     payload["_elapsed"] = round(elapsed, 1)
     return payload

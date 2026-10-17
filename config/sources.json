@@ -117,7 +117,7 @@
       "id": "hn_ai",
       "kind": "hn_search",
       "name": "Hacker News（AI/LLM 讨论）",
-      "url": "https://hn.algolia.com/api/v1/search?query={q}&tags=story&numericFilters=points%3E40&hitsPerPage=25",
+      "url": "https://hn.algolia.com/api/v1/search?query={q}&tags=story&numericFilters=created_at_i%3E{since_ts}%2Cpoints%3E10&hitsPerPage=25",
       "queries": [
         "LLM",
         "AI model",

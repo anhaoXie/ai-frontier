@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import traceback
 from pathlib import Path
@@ -36,6 +37,28 @@ if hasattr(sys.stdout, "reconfigure"):
 from src import pipeline_run  # noqa: E402
 
 
+def _already_fresh(now):
+    """今天已经成功采过一轮就返回 (候选数, 路径)，否则 None。
+
+    定时任务现在每 2 小时重试到 23:00。不设这道闸的话，一天会重跑七八次：
+    既把 novelty（"首次出现"）压成 0 —— 那正是打分里判断新意的依据 ——
+    又反复覆盖同一份数据。
+
+    判断依据刻意用「候选数 > 0」而不是「文件存在」：整个网络挂掉时
+    管线照样会写一个候选为 0 的文件（10-16 就是这样），那种日子恰恰
+    最需要后面几轮重试。
+    """
+    path = ROOT / "out" / "candidates" / f"{now.strftime('%Y-%m-%d')}.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    n = (data.get("totals") or {}).get("candidates") or 0
+    return (n, path) if n > 0 else None
+
+
 def run(args):
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
@@ -44,6 +67,13 @@ def run(args):
         print(f"[only] 只跑: {args.only}")
     print()
 
+    if getattr(args, "if_fresh", False) and not args.only:
+        hit = _already_fresh(now)
+        if hit:
+            print(f"今天已成功采集过（候选 {hit[0]} 条，{hit[1].name}），跳过本轮。")
+            print("要强制重跑，去掉 --if-fresh 即可。")
+            return 0
+
     def log(msg):
         print(msg, flush=True)
 
@@ -51,16 +81,26 @@ def run(args):
         window=args.window, only=args.only, no_state=args.no_state, log=log)
 
     print(f"\n写入 {payload['_paths']['json']}")
-    print(f"写入 {payload['_paths']['digest']}")
-    print(f"写入 {payload['_paths']['xlsx']}")
+    if payload["_paths"].get("digest"):
+        print(f"写入 {payload['_paths']['digest']}")
+    if payload["_paths"].get("xlsx"):
+        print(f"写入 {payload['_paths']['xlsx']}")
     hs = payload.get("http_stats", {})
     print(f"\n完成，用时 {payload['_elapsed']}s")
     print(f"  HTTP: {hs.get('requests')} 成功请求 / "
           f"{hs.get('failures')} 失败 / {hs.get('retries')} 次重试")
 
     diag = payload.get("source_diagnostics", {})
+    # 先摘出「源自带发布日历、今天本来就不发布」的（如 arXiv 的 skipDays 周末）。
+    # 把它们混进告警，等于每天制造一条误报；误报多了，真故障就没人看了。
+    expected = [(v["name"], v.get("skip_day")) for v in diag.values()
+                if v.get("skip_day")]
     bad = [(v["name"], v.get("warnings") or ["未知"]) for v in diag.values()
-           if not v["ok"]]
+           if not v["ok"] and not v.get("skip_day")]
+    if expected:
+        print(f"\n  · 按源自身日历今天不发布（非故障，{len(expected)} 个）：")
+        for name, day in expected:
+            print(f"     - {name}（skipDays 含 {day}）")
     if bad:
         print(f"\n  ⚠ 无产出的源（{len(bad)}）—— 必须看清原因，"
               f"有些是网络问题，有些是源静默变空：")
@@ -77,8 +117,8 @@ def main():
                     help="只跑指定源，逗号分隔")
     ap.add_argument("--no-state", action="store_true",
                     help="不更新已见状态")
-    ap.add_argument("--json-only", action="store_true",
-                    help="（已废弃，忽略；Excel 始终生成）")
+    ap.add_argument("--if-fresh", action="store_true",
+                    help="今天已成功采过就跳过（定时任务用，避免重复覆盖）")
     args = ap.parse_args()
     try:
         return run(args)
