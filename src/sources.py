@@ -57,18 +57,35 @@ def strip_html(s: str) -> str:
     return WS_RE.sub(" ", s).strip()
 
 
+BARE_URL_RE = re.compile(
+    r"^(?:(?:\d{1,3}\.){3}\d{1,3}|[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,})"
+    r"(?::\d+)?(?:[/?#]|$)"
+)
+
+
 def normalize_url(url: str) -> str:
+    """规范化链接：去追踪参数、去片段、统一大小写，用于去重与展示。
+
+    裸域名（``example.com/post``）要先补 ``https://`` 再解析：否则 urlparse 会把它
+    当成纯路径，urlunparse 拼出 ``https:example.com/post``（缺 ``//``）这种打不开的链接。
+    真正的相对路径（``/post/1``）无法脱离 base 补全，原样返回交给调用方处理。
+    """
     if not url:
         return ""
+    raw = url.strip()
     try:
-        p = urlparse(url.strip())
+        p = urlparse(raw)
+        if not p.scheme and not p.netloc:
+            if not BARE_URL_RE.match(raw):
+                return raw
+            p = urlparse("https://" + raw)
         q = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=False)
              if k.lower() not in TRACKING_PARAMS]
         path = p.path.rstrip("/") or "/"
         return urlunparse((p.scheme.lower() or "https", p.netloc.lower(), path,
                            "", urlencode(q), ""))
     except Exception:
-        return url.strip()
+        return raw
 
 
 def fingerprint(*parts) -> str:
